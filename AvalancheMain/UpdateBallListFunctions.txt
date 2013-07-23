@@ -1,0 +1,380 @@
+inline int UpdateBallListV1(IplImage* Image, CvSeq* BallList, _Threshold BallThreshold, CvRect ROI, int Colour)
+{
+	static CvMemStorage* Storage = cvCreateMemStorage(0);
+	CvSeq* Contours;
+		
+	int j;
+	int NewBalls = 0;
+	CvSize Size = cvGetSize(Image);
+	static IplImage* Thresholded = cvCreateImage(Size, IPL_DEPTH_8U, 1);
+	
+	cvSetZero(Thresholded);
+	cvSetImageROI(Thresholded, ROI);	
+	cvSetImageROI(Image, ROI);
+
+	CvRect ContourBoundingRect;
+	CvPoint ContourCenter;
+	int ContourRadius;
+	_Ball* TempBall;
+	
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		TempBall->Updated = 0;
+		if(ClosePoints(TempBall->BirthCenter, TempBall->Center, TempBall->Radius))
+		{
+			TempBall->StagnationDuration = GlobalTime - TempBall->BirthTime;
+			if(TempBall->StagnationDuration > BallMaxTimeOnRamp/6)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+
+	cvInRangeS(Image, BallThreshold.Min, BallThreshold.Max, Thresholded);
+	cvDilate(Thresholded, Thresholded);
+	
+	cvFindContours(Thresholded, Storage, &Contours, sizeof(CvContour), CV_RETR_CCOMP, 2, cvPoint(ROI.x, ROI.y));
+	
+	cvResetImageROI(Thresholded);
+			
+	while(Contours)
+	{					
+		ContourBoundingRect = cvBoundingRect(Contours, 1);
+		ContourCenter = cvPoint(ContourBoundingRect.x + (ContourBoundingRect.width/2),
+								ContourBoundingRect.y + (ContourBoundingRect.height/2));
+		ContourRadius = (ContourBoundingRect.width + ContourBoundingRect.height)/4;
+		
+		for(j = 0; j < BallList->total; j++)
+		{
+			TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+			if(ClosePoints(ContourCenter, TempBall->Center, (TempBall->Radius)*4) && ContourRadius <= 4*(TempBall->Radius))
+			{
+				TempBall->PrevPosition = TempBall->Center;
+				TempBall->Center = ContourCenter;
+				TempBall->Radius = (TempBall->Radius + ContourRadius)/2;
+				TempBall->Updated = 1;
+				SetExpectedPoint(TempBall);
+				break;
+			}
+		}
+		if(j == BallList->total)
+		{
+			if(isNewBall(ContourBoundingRect, ContourCenter, ContourRadius))
+			{
+				_Ball::TotalBalls++;
+				TempBall = (_Ball*)malloc(sizeof(_Ball));
+				TempBall->Center = ContourCenter;
+				TempBall->BirthCenter = ContourCenter;
+				TempBall->PrevPosition =ContourCenter;
+				TempBall->ExpectedPosition = cvPoint(-1, -1);
+				TempBall->Colour = Colour;
+				TempBall->Radius = ContourRadius;
+				TempBall->Updated = 1;
+				TempBall->BirthTime = GlobalTime;
+				TempBall->BallID = _Ball::TotalBalls;
+				cvSeqPush(BallList, TempBall);
+				NewBalls++;
+			}
+		}
+		Contours = Contours->h_next;
+	}
+	
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		if(TempBall->Updated == 0)
+		{
+			if(isDeadBall(TempBall))
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+		else
+		{
+			if(GlobalTime - TempBall->BirthTime >= 2*BallMaxTimeOnRamp)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+	cvClearMemStorage(Storage);
+	cvResetImageROI(Image);
+	cvResetImageROI(Thresholded);
+	return NewBalls;
+}
+
+inline int UpdateBallListV2(IplImage* Image, CvSeq* BallList, _Threshold BallThreshold, CvRect ROI, int Colour)
+{
+#pragma region Variables
+	static CvMemStorage* Storage = cvCreateMemStorage(0);
+	static CvSize Size = cvGetSize(Image);
+	static IplImage* Thresholded = cvCreateImage(Size, IPL_DEPTH_8U, 1);
+	static IplImage* ImageCopy = cvCreateImage(Size, IPL_DEPTH_8U, 3);
+	
+	CvSeq* Contours;
+	CvRect ContourBoundingRect;
+	CvPoint ContourCenter;
+	int ContourRadius;
+	CvScalar ContourAvg;
+	CvScalar Mean, Std;
+	int ThresholdValue;
+
+	_Ball* TempBall;
+		
+	int j;
+	int NewBalls = 0;	
+#pragma endregion
+	
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		TempBall->Updated = 0;
+		if(ClosePoints(TempBall->BirthCenter, TempBall->Center, TempBall->Radius))
+		{
+			TempBall->StagnationDuration = GlobalTime - TempBall->BirthTime;
+			if(TempBall->StagnationDuration > BallMaxTimeOnRamp/6)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+
+	cvAbsDiff(Background, Image, ImageCopy);
+	cvCvtColor(ImageCopy, Thresholded, CV_BGR2GRAY);
+	
+	cvAvgSdv(Thresholded, &Mean, &Std);
+	ThresholdValue = cvRound(Mean.val[0] + 3*Std.val[0]);
+	cvThreshold(Thresholded, Thresholded, ThresholdValue, 255, CV_THRESH_BINARY);
+	cvErode(Thresholded, Thresholded);
+			
+	cvSetImageROI(Thresholded, ROI);
+	cvDilate(Thresholded, Thresholded);
+	cvFindContours(Thresholded, Storage, &Contours, sizeof(CvContour), CV_RETR_CCOMP, 2, cvPoint(ROI.x, ROI.y));
+	cvResetImageROI(Thresholded);
+	
+	//cvDrawContours(ImageCopy, Contours, cvScalar(0, 0, 255), cvScalar(255, 0, 0), 5, 2);
+	//cvShowImage("Contours", ImageCopy);
+
+	//switch(Colour)
+	//{
+	//case Red:
+	//	cout<<"Red \n\n";
+	//	break;
+	//case Blue:
+	//	cout<<"Blue \n\n";
+	//	break;
+	//case Black:
+	//	cout<<"Black \n\n";
+	//	break;
+	//}
+		
+	while(Contours)
+	{					
+		ContourBoundingRect = cvBoundingRect(Contours, 1);
+		ContourCenter = cvPoint(ContourBoundingRect.x + (ContourBoundingRect.width/2),
+								ContourBoundingRect.y + (ContourBoundingRect.height/2));
+		ContourRadius = (ContourBoundingRect.width + ContourBoundingRect.height)/4;
+		
+		ContourAvg = cvGet2D(Image, ContourCenter.y, ContourCenter.x);
+
+		if(inRangeSS(ContourAvg, BallThreshold))
+		{
+			for(j = 0; j < BallList->total; j++)
+			{		
+				TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+				if(ClosePoints(ContourCenter, TempBall->Center, (TempBall->Radius)*4) && ContourRadius <= 4*(TempBall->Radius))
+				{
+					TempBall->PrevPosition = TempBall->Center;
+					TempBall->Center = ContourCenter;
+					TempBall->Radius = (TempBall->Radius + ContourRadius)/2;
+					TempBall->Updated = 1;
+					SetExpectedPoint(TempBall);
+					break;
+				}
+			}
+			
+			if(j == BallList->total)
+			{
+				if(isNewBall(ContourBoundingRect, ContourCenter, ContourRadius))
+				{
+					_Ball::TotalBalls++;
+					TempBall = (_Ball*)malloc(sizeof(_Ball));
+					TempBall->Center = ContourCenter;
+					TempBall->BirthCenter = ContourCenter;
+					TempBall->PrevPosition =ContourCenter;
+					TempBall->ExpectedPosition = cvPoint(-1, -1);
+					TempBall->Colour = Colour;
+					TempBall->Radius = ContourRadius;
+					TempBall->Updated = 1;
+					TempBall->BirthTime = GlobalTime;
+					TempBall->BallID = _Ball::TotalBalls;
+					cvSeqPush(BallList, TempBall);
+					NewBalls++;
+				}
+			}
+		}
+		Contours = Contours->h_next;
+	}
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		if(TempBall->Updated == 0)
+		{
+			if(isDeadBall(TempBall))
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+		else
+		{
+			if(GlobalTime - TempBall->BirthTime >= 2*BallMaxTimeOnRamp)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+
+	cvClearMemStorage(Storage);
+	return NewBalls;
+}
+
+inline int UpdateBallListV3(IplImage* Image, CvSeq* BallList, _Threshold BallThreshold, CvRect ROI, int Colour)
+{
+#pragma region Variables
+	static CvMemStorage* Storage = cvCreateMemStorage(0);
+	static CvSize Size = cvGetSize(Image);
+	static IplImage* Thresholded = cvCreateImage(Size, IPL_DEPTH_8U, 1);
+	static IplImage* ImageCopy = cvCreateImage(Size, IPL_DEPTH_8U, 3);
+	
+	CvSeq* Contours;
+	CvRect ContourBoundingRect;
+	CvPoint ContourCenter;
+	int ContourRadius;
+	CvScalar ContourAvg;
+	CvScalar Mean, Std;
+	int ThresholdValue;
+
+	_Ball* TempBall;
+		
+	int j;
+	int NewBalls = 0;	
+#pragma endregion
+	
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		TempBall->Updated = 0;
+		if(ClosePoints(TempBall->BirthCenter, TempBall->Center, TempBall->Radius))
+		{
+			TempBall->StagnationDuration = GlobalTime - TempBall->BirthTime;
+			if(TempBall->StagnationDuration > BallMaxTimeOnRamp/6)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+
+	cvAbsDiff(Background, Image, ImageCopy);
+	cvCvtColor(ImageCopy, Thresholded, CV_BGR2GRAY);
+	
+	cvAvgSdv(Thresholded, &Mean, &Std);
+	ThresholdValue = cvRound(Mean.val[0] + 3*Std.val[0]);
+	cvThreshold(Thresholded, Thresholded, ThresholdValue, 255, CV_THRESH_BINARY);
+	cvErode(Thresholded, Thresholded);
+			
+	cvSetImageROI(Thresholded, ROI);
+	cvDilate(Thresholded, Thresholded);
+	cvFindContours(Thresholded, Storage, &Contours, sizeof(CvContour), CV_RETR_CCOMP, 2, cvPoint(ROI.x, ROI.y));
+	cvResetImageROI(Thresholded);
+	
+	//cvDrawContours(ImageCopy, Contours, cvScalar(0, 0, 255), cvScalar(255, 0, 0), 5, 2);
+	//cvShowImage("Contours", ImageCopy);
+
+	//switch(Colour)
+	//{
+	//case Red:
+	//	cout<<"Red \n\n";
+	//	break;
+	//case Blue:
+	//	cout<<"Blue \n\n";
+	//	break;
+	//case Black:
+	//	cout<<"Black \n\n";
+	//	break;
+	//}
+		
+	while(Contours)
+	{					
+		ContourBoundingRect = cvBoundingRect(Contours, 1);
+		ContourCenter = cvPoint(ContourBoundingRect.x + (ContourBoundingRect.width/2),
+								ContourBoundingRect.y + (ContourBoundingRect.height/2));
+		ContourRadius = (ContourBoundingRect.width + ContourBoundingRect.height)/4;
+		
+		ContourAvg = cvGet2D(Image, ContourCenter.y, ContourCenter.x);
+
+		for(j = 0; j < BallList->total; j++)
+		{		
+			TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+			if(ClosePoints(ContourCenter, TempBall->Center, (TempBall->Radius)*4) && ContourRadius <= 4*(TempBall->Radius))
+			{
+				TempBall->PrevPosition = TempBall->Center;
+				TempBall->Center = ContourCenter;
+				TempBall->Radius = (TempBall->Radius + ContourRadius)/2;
+				TempBall->Updated = 1;
+				SetExpectedPoint(TempBall);
+				break;
+			}
+		}
+		if(j == BallList->total)
+		{
+			if(isNewBall(ContourBoundingRect, ContourCenter, ContourRadius) && PossibleColour(ContourAvg) == Colour )
+			{
+				_Ball::TotalBalls++;
+				TempBall = (_Ball*)malloc(sizeof(_Ball));
+				TempBall->Center = ContourCenter;
+				TempBall->BirthCenter = ContourCenter;
+				TempBall->PrevPosition =ContourCenter;
+				TempBall->ExpectedPosition = cvPoint(-1, -1);
+				TempBall->Colour = Colour;
+				TempBall->Radius = ContourRadius;
+				TempBall->Updated = 1;
+				TempBall->BirthTime = GlobalTime;
+				TempBall->BallID = _Ball::TotalBalls;
+				cvSeqPush(BallList, TempBall);
+				NewBalls++;
+			}
+		}
+		Contours = Contours->h_next;
+	}
+	for(j = 0; j < BallList->total; j++)
+	{
+		TempBall = (_Ball*)cvGetSeqElem(BallList, j);
+		if(TempBall->Updated == 0)
+		{
+			if(isDeadBall(TempBall))
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+		else
+		{
+			if(GlobalTime - TempBall->BirthTime >= 2*BallMaxTimeOnRamp)
+			{
+				cvSeqRemove(BallList, j);
+				j--;
+			}
+		}
+	}
+
+	cvClearMemStorage(Storage);
+	return NewBalls;
+}

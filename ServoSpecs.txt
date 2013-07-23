@@ -1,0 +1,3 @@
+Neutral 1.15 ms
+Extreme Left 0.90 ms
+Extreme Right 1.40 ms
